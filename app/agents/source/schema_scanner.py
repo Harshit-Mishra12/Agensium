@@ -1,68 +1,94 @@
 import pandas as pd
 import io
+from fastapi import HTTPException
 
-def scan_schema(file_contents: bytes):
+def _profile_dataframe(df: pd.DataFrame):
     """
-    Scans the schema of a CSV file provided as bytes.
-
-    Args:
-        file_contents: The byte content of the CSV file.
-
-    Returns:
-        A dictionary containing the schema summary.
+    Helper function to generate a schema summary for a single DataFrame.
     """
-    print( "Scanning schema..." )
-    try:
-        # Read the byte content into a pandas DataFrame
-        df = pd.read_csv(io.BytesIO(file_contents))
-    except Exception as e:
-        return {"error": f"Could not parse CSV file. Details: {e}"}
-
-    # Prepare a list to hold the summary data for each column
+    # Handle empty dataframes
+    if df.empty:
+        return {
+            "summary_table": [],
+            "total_rows": 0,
+            "message": "Sheet is empty."
+        }
+        
     schema_summary = []
-    total_rows = len(df)
 
-    # Loop through each column in the DataFrame
     for col in df.columns:
         # 1. Calculate Null Percentage
         null_count = df[col].isnull().sum()
-        null_percentage = (null_count / total_rows) * 100 if total_rows > 0 else 0
+        total_count = len(df)
+        null_percentage = (null_count / total_count) * 100 if total_count > 0 else 0
 
         # 2. Get Distinct Count
         distinct_count = df[col].nunique()
 
-        # 3. Get Top 3 Values
+        # 3. Get Top Values (we'll take the top 3)
         top_values = df[col].value_counts().nlargest(3).index.tolist()
         top_values_str = ', '.join(map(str, top_values))
 
-        # 4. Infer Data Type with a fallback
-        inferred_type = str(df[col].dtype)
-        data_type = "Text" # Default to Text
-        if "int" in inferred_type:
-            data_type = "Integer"
-        elif "float" in inferred_type:
-            data_type = "Float"
-        elif "datetime" in inferred_type:
-            data_type = "Datetime"
-        # A simple check to see if an 'object' column could be a date
-        elif inferred_type == 'object':
+        # 4. Get Data Type (with date detection)
+        col_type = str(df[col].dtype)
+        if 'object' in col_type:
             try:
-                pd.to_datetime(df[col], errors='raise', infer_datetime_format=True)
+                pd.to_datetime(df[col], errors='raise')
                 data_type = 'Date'
             except (ValueError, TypeError):
                 data_type = 'Text'
+        elif 'int' in col_type:
+            data_type = 'Integer'
+        elif 'float' in col_type:
+            data_type = 'Float'
+        elif 'datetime' in col_type:
+            data_type = 'Date'
+        else:
+            data_type = col_type
 
-        # Append all the info to our summary list
         schema_summary.append({
-            "Field": col,
-            "Data Type": data_type,
-            "Null %": f"{null_percentage:.1f}%",
-            "Distinct Count": distinct_count,
-            "Top Values": top_values_str + ('…' if distinct_count > 3 else '')
+            "field": col,
+            "data_type": data_type,
+            "null": f"{null_percentage:.1f}%",
+            "distinct_count": distinct_count,
+            "top_values": top_values_str + ('…' if distinct_count > 3 else '')
         })
 
     return {
-        "file_name": "uploaded_file.csv", # In a real app, you'd get this from the UploadFile object
-        "total_rows": total_rows,
-        "schema_summary": schema_summary
+        "summary_table": schema_summary,
+        "total_rows": len(df)
     }
+
+def scan_schema(file_contents: bytes, filename: str):
+    """
+    Scans a CSV or Excel file and returns a schema profile.
+    Handles multiple sheets in Excel files.
+    """
+    file_extension = filename.split('.')[-1].lower()
+    all_sheets_summary = {}
+
+    try:
+        if file_extension == 'csv':
+            df = pd.read_csv(io.BytesIO(file_contents))
+            sheet_name = filename.rsplit('.', 1)[0]
+            all_sheets_summary[sheet_name] = _profile_dataframe(df)
+
+        elif file_extension in ['xlsx', 'xls']:
+            # Load all sheets by setting sheet_name=None
+            xls_sheets = pd.read_excel(io.BytesIO(file_contents), sheet_name=None)
+            
+            if not xls_sheets:
+                raise ValueError("The Excel file appears to be empty or has no sheets.")
+
+            for sheet_name, df in xls_sheets.items():
+                all_sheets_summary[sheet_name] = _profile_dataframe(df)
+        
+        else:
+            # This case should be caught by the router, but it's good practice to have it.
+            raise HTTPException(status_code=400, detail=f"Unsupported file format: {file_extension}")
+
+        return all_sheets_summary
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process the file '{filename}'. Error: {str(e)}")
+

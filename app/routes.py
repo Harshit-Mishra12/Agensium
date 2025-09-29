@@ -5,6 +5,7 @@ import pandas as pd
 
 
 router = APIRouter()
+SUPPORTED_FILE_EXTENSIONS = {"csv", "xlsx", "xls"}
 
 # Agent endpoints
 @router.post("/scan-schema")
@@ -13,14 +14,17 @@ async def scan_schema(file: UploadFile = File(...)):
     Accepts a file upload (e.g., CSV), scans its schema, and returns a profile.
     """
     # Ensure the uploaded file is a CSV
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a CSV file.")
+    file_extension = file.filename.split('.')[-1].lower()
+    if file_extension not in SUPPORTED_FILE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid file type. Supported types are: {', '.join(SUPPORTED_FILE_EXTENSIONS)}")
 
     try:
         # Read the file content as bytes
         contents = await file.read()
         # Pass the raw bytes to the agent for processing
-        return schema_scanner.scan_schema(contents)
+        return schema_scanner.scan_schema(contents, file.filename)
     except Exception as e:
         # Handle potential errors during file processing
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
