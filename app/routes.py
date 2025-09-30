@@ -12,8 +12,11 @@ SUPPORTED_FILE_EXTENSIONS = {"csv", "xlsx", "xls","json","sql"}
 # --- Schema scanner endpoint ---
 @router.post("/scan-schema")
 async def scan_schema(file: UploadFile = File(...)):
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a CSV file.")
+    file_extension = file.filename.split('.')[-1].lower()
+    if file_extension not in SUPPORTED_FILE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid file type. Supported types are: {', '.join(SUPPORTED_FILE_EXTENSIONS)}")
     try:
         contents = await file.read()
         return schema_scanner.scan_schema(contents, file.filename)
