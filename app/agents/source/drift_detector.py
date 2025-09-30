@@ -1,17 +1,15 @@
 import pandas as pd
 import numpy as np
+import sqlite3
 from scipy.stats import ks_2samp, chi2_contingency
+
 
 class DriftDetector:
     @staticmethod
-    def detect_drift(baseline_csv: str, current_csv: str):
+    def _detect_drift_between_dfs(baseline_df: pd.DataFrame, current_df: pd.DataFrame):
         """
-        Detect schema and data drift between baseline and current CSVs.
-        Returns JSON with drifted fields, drift scores, direction, and p-values.
+        Core drift detection logic between two dataframes.
         """
-        baseline_df = pd.read_csv(baseline_csv)
-        current_df = pd.read_csv(current_csv)
-
         drift_report = {}
 
         # --- Schema Drift ---
@@ -29,7 +27,9 @@ class DriftDetector:
         # Data type changes
         for col in baseline_cols & current_cols:
             if baseline_df[col].dtype != current_df[col].dtype:
-                drift_report[col] = {"schema_change": f"type change: {baseline_df[col].dtype} → {current_df[col].dtype}"}
+                drift_report[col] = {
+                    "schema_change": f"type change: {baseline_df[col].dtype} → {current_df[col].dtype}"
+                }
 
         # --- Data Drift ---
         shared_cols = baseline_cols & current_cols
@@ -89,3 +89,54 @@ class DriftDetector:
                     drift_report[col] = {"note": f"datetime drift detection failed: {e}"}
 
         return drift_report
+
+    @staticmethod
+    def _load_sql_to_dfs(sql_path: str):
+        """
+        Load all tables from a .sql file (SQLite dump) into a dict of DataFrames.
+        """
+        with open(sql_path, "r", encoding="utf-8") as f:
+            sql_text = f.read()
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            cursor = conn.cursor()
+            cursor.executescript(sql_text)
+
+            tables_df = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table';", conn)
+            table_dfs = {}
+            for table in tables_df["name"].tolist():
+                table_dfs[table] = pd.read_sql(f"SELECT * FROM {table};", conn)
+
+            return table_dfs
+        finally:
+            conn.close()
+
+    @staticmethod
+    def detect_drift(baseline_file: str, current_file: str):
+        """
+        Detect schema & data drift between CSVs or SQL files.
+        - If CSV: compare directly.
+        - If SQL: compare shared tables.
+        """
+        if baseline_file.endswith(".csv") and current_file.endswith(".csv"):
+            baseline_df = pd.read_csv(baseline_file)
+            current_df = pd.read_csv(current_file)
+            return DriftDetector._detect_drift_between_dfs(baseline_df, current_df)
+
+        elif baseline_file.endswith(".sql") and current_file.endswith(".sql"):
+            baseline_tables = DriftDetector._load_sql_to_dfs(baseline_file)
+            current_tables = DriftDetector._load_sql_to_dfs(current_file)
+
+            shared_tables = set(baseline_tables.keys()) & set(current_tables.keys())
+            report = {}
+
+            for table in shared_tables:
+                report[table] = DriftDetector._detect_drift_between_dfs(
+                    baseline_tables[table], current_tables[table]
+                )
+
+            return report
+
+        else:
+            raise ValueError("Both files must be of the same type (.csv or .sql)")
