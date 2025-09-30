@@ -16,7 +16,7 @@ async def scan_schema(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a CSV file.")
     try:
         contents = await file.read()
-        return schema_scanner.scan_schema(contents)
+        return schema_scanner.scan_schema(contents, file.filename)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
 
