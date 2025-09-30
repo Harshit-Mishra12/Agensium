@@ -2,7 +2,9 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import io
+import os
 from scipy.stats import entropy
+
 
 def _profile_dataframe(df: pd.DataFrame, baseline_schema: dict | None = None):
     """
@@ -82,34 +84,68 @@ def _profile_dataframe(df: pd.DataFrame, baseline_schema: dict | None = None):
     results["anomalies"] = anomalies
     return results
 
+
 # --- File type handlers ---
-def profile_csv(contents: bytes):
+def profile_csv(contents: bytes, filename: str):
     df = pd.read_csv(io.BytesIO(contents))
-    return _profile_dataframe(df)
+    file_key = os.path.splitext(filename)[0]
+    return {
+        file_key: {
+            "main": _profile_dataframe(df)
+        }
+    }
 
-def profile_excel(contents: bytes):
-    df = pd.read_excel(io.BytesIO(contents))
-    return _profile_dataframe(df)
 
-def profile_json(contents: bytes):
+def profile_excel(contents: bytes, filename: str):
+    xls = pd.ExcelFile(io.BytesIO(contents))
+    file_key = os.path.splitext(filename)[0]
+    result = {}
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(io.BytesIO(contents), sheet_name=sheet)
+        result[sheet] = _profile_dataframe(df)
+    return {file_key: result}
+
+
+def profile_json(contents: bytes, filename: str):
     df = pd.read_json(io.BytesIO(contents))
-    return _profile_dataframe(df)
+    file_key = os.path.splitext(filename)[0]
+    return {
+        file_key: {
+            "main": _profile_dataframe(df)
+        }
+    }
 
-def profile_sql(contents: bytes):
+
+def profile_sql(contents: bytes, filename: str):
     sql_text = contents.decode("utf-8")
     conn = sqlite3.connect(":memory:")
+    file_key = os.path.splitext(filename)[0]
 
     try:
         cursor = conn.cursor()
         cursor.executescript(sql_text)
 
         tables_df = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table';", conn)
-        results = {"tables": {}}
-
+        result = {}
         for table in tables_df["name"].tolist():
             df = pd.read_sql(f"SELECT * FROM {table};", conn)
-            results["tables"][table] = _profile_dataframe(df)
+            result[table] = _profile_dataframe(df)
 
-        return results
+        return {file_key: result}
     finally:
         conn.close()
+
+
+# --- Dispatcher by extension ---
+def profile_file(contents: bytes, filename: str):
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in [".csv"]:
+        return profile_csv(contents, filename)
+    elif ext in [".xls", ".xlsx"]:
+        return profile_excel(contents, filename)
+    elif ext in [".json"]:
+        return profile_json(contents, filename)
+    elif ext in [".sql"]:
+        return profile_sql(contents, filename)
+    else:
+        raise ValueError(f"Unsupported file type: {ext}")

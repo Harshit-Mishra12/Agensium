@@ -1,13 +1,13 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.agents.source import schema_scanner, dedup_agent, field_profiler, drift_detector,readiness_rater
+from app.agents.source import schema_scanner, dedup_agent, field_profiler, drift_detector, readiness_rater
 from app.orchestrator import workflow
-import pandas as pd
-from tempfile import NamedTemporaryFile
-import shutil
 import os
+import shutil
+from tempfile import NamedTemporaryFile
 
 router = APIRouter()
-SUPPORTED_FILE_EXTENSIONS = {"csv", "xlsx", "xls","json","sql"}
+SUPPORTED_FILE_EXTENSIONS = {"csv", "xlsx", "xls", "json", "sql"}
+
 
 # --- Schema scanner endpoint ---
 @router.post("/scan-schema")
@@ -15,8 +15,9 @@ async def scan_schema(file: UploadFile = File(...)):
     file_extension = file.filename.split('.')[-1].lower()
     if file_extension not in SUPPORTED_FILE_EXTENSIONS:
         raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid file type. Supported types are: {', '.join(SUPPORTED_FILE_EXTENSIONS)}")
+            status_code=400,
+            detail=f"Invalid file type. Supported types are: {', '.join(SUPPORTED_FILE_EXTENSIONS)}"
+        )
     try:
         contents = await file.read()
         return schema_scanner.scan_schema(contents, file.filename)
@@ -29,38 +30,47 @@ async def scan_schema(file: UploadFile = File(...)):
 async def profile_dataset(file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        filename = file.filename.lower()
+        filename = file.filename
 
-        if filename.endswith(".csv"):
-            return {"tables": {"csv_file": field_profiler.profile_csv(contents)}}
+        if filename.lower().endswith(".csv"):
+            return field_profiler.profile_csv(contents, filename)
 
-        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-            return {"tables": {"excel_file": field_profiler.profile_excel(contents)}}
+        elif filename.lower().endswith((".xlsx", ".xls")):
+            return field_profiler.profile_excel(contents, filename)
 
-        elif filename.endswith(".json"):
-            return {"tables": {"json_file": field_profiler.profile_json(contents)}}
+        elif filename.lower().endswith(".json"):
+            return field_profiler.profile_json(contents, filename)
 
-        elif filename.endswith(".sql"):
-            return field_profiler.profile_sql(contents)
+        elif filename.lower().endswith(".sql"):
+            return field_profiler.profile_sql(contents, filename)
 
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file type. Upload CSV, Excel, JSON, or SQL.")
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file type. Upload CSV, Excel, JSON, or SQL."
+            )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
 
+
+# --- Readiness rater endpoint ---
 @router.post("/rate-readiness")
 async def rate_readiness_endpoint(file: UploadFile = File(...)):
     """
     Calculates the readiness score for a dataset from an uploaded file.
-    Supported file types: CSV, Excel, JSON, Parquet, SQL.
+    Supported file types: CSV, Excel, JSON, SQL.
     """
     file_extension = file.filename.split('.')[-1].lower()
     if file_extension not in SUPPORTED_FILE_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file format for readiness rating: {file_extension}")
-    
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format for readiness rating: {file_extension}"
+        )
+
     contents = await file.read()
     return readiness_rater.rate_readiness(contents, file.filename)
+
 
 # --- Deduplicate endpoint ---
 @router.post("/deduplicate")
@@ -86,7 +96,10 @@ async def detect_drift(
     """
     valid_ext = (".csv", ".xlsx", ".xls", ".json", ".sql")
     if not baseline_file.filename.lower().endswith(valid_ext) or not current_file.filename.lower().endswith(valid_ext):
-        raise HTTPException(status_code=400, detail="Files must be of the same supported type (CSV, Excel, JSON, SQL).")
+        raise HTTPException(
+            status_code=400,
+            detail="Files must be of the same supported type (CSV, Excel, JSON, SQL)."
+        )
 
     try:
         # Save baseline temp file
