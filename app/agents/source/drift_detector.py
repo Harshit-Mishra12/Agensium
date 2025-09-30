@@ -1,15 +1,13 @@
 import pandas as pd
 import numpy as np
 import sqlite3
+import json
 from scipy.stats import ks_2samp, chi2_contingency
 
 
 class DriftDetector:
     @staticmethod
     def _detect_drift_between_dfs(baseline_df: pd.DataFrame, current_df: pd.DataFrame):
-        """
-        Core drift detection logic between two dataframes.
-        """
         drift_report = {}
 
         # --- Schema Drift ---
@@ -46,8 +44,8 @@ class DriftDetector:
                     ks_stat, p_value = ks_2samp(base_col, curr_col)
                     direction = "increase" if curr_col.mean() > base_col.mean() else "decrease"
                     drift_report[col] = {
-                        "drift_score": float(ks_stat),
-                        "p_value": float(p_value),
+                        "drift_score": round(float(ks_stat), 2),
+                        "p_value": round(float(p_value), 2),
                         "direction": f"{direction} in mean {col}"
                     }
                 except Exception as e:
@@ -66,8 +64,8 @@ class DriftDetector:
                     new_categories = list(set(curr_col.unique()) - set(base_col.unique()))
                     direction = "new categories appeared" if new_categories else "distribution changed"
                     drift_report[col] = {
-                        "drift_score": float(chi2),
-                        "p_value": float(p_value),
+                        "drift_score": round(float(chi2), 2),
+                        "p_value": round(float(p_value), 2),
                         "direction": direction
                     }
                 except Exception as e:
@@ -90,11 +88,9 @@ class DriftDetector:
 
         return drift_report
 
+    # --- Loaders for different file types ---
     @staticmethod
     def _load_sql_to_dfs(sql_path: str):
-        """
-        Load all tables from a .sql file (SQLite dump) into a dict of DataFrames.
-        """
         with open(sql_path, "r", encoding="utf-8") as f:
             sql_text = f.read()
 
@@ -113,12 +109,18 @@ class DriftDetector:
             conn.close()
 
     @staticmethod
+    def _load_json_to_df(json_path: str) -> pd.DataFrame:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):  # list of dicts
+            return pd.DataFrame(data)
+        elif isinstance(data, dict):  # dict of lists
+            return pd.DataFrame([data])
+        else:
+            raise ValueError("Unsupported JSON structure for drift detection")
+
+    @staticmethod
     def detect_drift(baseline_file: str, current_file: str):
-        """
-        Detect schema & data drift between CSVs or SQL files.
-        - If CSV: compare directly.
-        - If SQL: compare shared tables.
-        """
         if baseline_file.endswith(".csv") and current_file.endswith(".csv"):
             baseline_df = pd.read_csv(baseline_file)
             current_df = pd.read_csv(current_file)
@@ -130,13 +132,21 @@ class DriftDetector:
 
             shared_tables = set(baseline_tables.keys()) & set(current_tables.keys())
             report = {}
-
             for table in shared_tables:
                 report[table] = DriftDetector._detect_drift_between_dfs(
                     baseline_tables[table], current_tables[table]
                 )
-
             return report
 
+        elif baseline_file.endswith(".json") and current_file.endswith(".json"):
+            baseline_df = DriftDetector._load_json_to_df(baseline_file)
+            current_df = DriftDetector._load_json_to_df(current_file)
+            return DriftDetector._detect_drift_between_dfs(baseline_df, current_df)
+
+        elif baseline_file.endswith((".xls", ".xlsx")) and current_file.endswith((".xls", ".xlsx")):
+            baseline_df = pd.read_excel(baseline_file)
+            current_df = pd.read_excel(current_file)
+            return DriftDetector._detect_drift_between_dfs(baseline_df, current_df)
+
         else:
-            raise ValueError("Both files must be of the same type (.csv or .sql)")
+            raise ValueError("Both files must be of the same type (.csv, .sql, .json, .xls, .xlsx)")

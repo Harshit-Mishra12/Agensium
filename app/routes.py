@@ -20,20 +20,27 @@ async def scan_schema(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
 
 
-# --- Field profiler endpoint (CSV or SQL) ---
+# --- Field profiler endpoint (CSV, Excel, JSON, SQL) ---
 @router.post("/field-profiler")
 async def profile_dataset(file: UploadFile = File(...)):
     try:
         contents = await file.read()
+        filename = file.filename.lower()
 
-        if file.filename.endswith(".csv"):
+        if filename.endswith(".csv"):
             return {"tables": {"csv_file": field_profiler.profile_csv(contents)}}
 
-        elif file.filename.endswith(".sql"):
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            return {"tables": {"excel_file": field_profiler.profile_excel(contents)}}
+
+        elif filename.endswith(".json"):
+            return {"tables": {"json_file": field_profiler.profile_json(contents)}}
+
+        elif filename.endswith(".sql"):
             return field_profiler.profile_sql(contents)
 
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file type. Upload .csv or .sql")
+            raise HTTPException(status_code=400, detail="Unsupported file type. Upload CSV, Excel, JSON, or SQL.")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
@@ -51,19 +58,19 @@ def run_workflow(dataset: list[dict], items: list[str]):
     return workflow(dataset, items)
 
 
-# --- Drift Detector endpoint (CSV or SQL) ---
+# --- Drift Detector endpoint (CSV, Excel, JSON, SQL) ---
 @router.post("/detect-drift")
 async def detect_drift(
     baseline_file: UploadFile = File(...),
     current_file: UploadFile = File(...)
 ):
     """
-    Detect drift between baseline and current datasets (CSV or SQL).
+    Detect drift between baseline and current datasets (CSV, Excel, JSON, SQL).
     Returns JSON report with schema and data drift.
     """
-    valid_ext = (".csv", ".sql")
-    if not baseline_file.filename.endswith(valid_ext) or not current_file.filename.endswith(valid_ext):
-        raise HTTPException(status_code=400, detail="Files must be either both CSVs or both SQL dumps.")
+    valid_ext = (".csv", ".xlsx", ".xls", ".json", ".sql")
+    if not baseline_file.filename.lower().endswith(valid_ext) or not current_file.filename.lower().endswith(valid_ext):
+        raise HTTPException(status_code=400, detail="Files must be of the same supported type (CSV, Excel, JSON, SQL).")
 
     try:
         # Save baseline temp file
@@ -78,14 +85,14 @@ async def detect_drift(
             shutil.copyfileobj(current_file.file, tmp_curr)
             current_path = tmp_curr.name
 
-        # Detect drift (DriftDetector now supports both CSV and SQL)
+        # Detect drift
         report = drift_detector.DriftDetector.detect_drift(baseline_path, current_path)
         return report
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error detecting drift: {e}")
     finally:
-        # cleanup temp files
+        # Cleanup temp files
         try:
             os.remove(baseline_path)
             os.remove(current_path)
