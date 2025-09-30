@@ -6,3 +6,4 @@ pyarrow
 SQLAlchemy
 psycopg2-binary
 sqlparse
+scipy
