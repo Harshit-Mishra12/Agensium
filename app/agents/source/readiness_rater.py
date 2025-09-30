@@ -3,59 +3,6 @@ import io
 import sqlparse
 from fastapi import HTTPException
 
-def _read_data_and_calculate_score(source_type: str, file_contents: bytes, filename: str):
-    """
-    Reads data from an uploaded file and calculates the readiness score.
-    """
-    try:
-        # Handle SQL files separately as they contain schema, not data
-        if source_type == 'sql':
-            sql_script = file_contents.decode('utf-8')
-            parsed = sqlparse.parse(sql_script)
-            
-            schema_health_score = 100
-            if not parsed or not any(isinstance(t, sqlparse.sql.Statement) for t in parsed):
-                schema_health_score = 0 # Penalize heavily if the SQL is invalid
-
-            # A simple heuristic: Penalize if there are no CREATE TABLE statements
-            if 'create table' not in sql_script.lower():
-                schema_health_score -= 50
-
-            readiness_score = {
-                "overall": round(schema_health_score * 0.2), # Only schema health contributes
-                "completeness": 100, # Assume 100 as there's no data to have nulls
-                "consistency": 100,  # Assume 100 as there's no data to have duplicates
-                "schema_health": round(schema_health_score)
-            }
-            return readiness_score, 0 # 0 rows analyzed
-
-        # Process data-containing files (CSV, Excel, etc.)
-        df = _read_data_from_file(source_type, file_contents)
-        readiness_score = _calculate_readiness_score(df)
-        return readiness_score, len(df)
-
-    except (IOError, ValueError) as e:
-         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred while processing '{filename}': {str(e)}")
-
-
-def _read_data_from_file(source_type: str, file_contents: bytes):
-    """
-    Reads data from various file formats into a DataFrame.
-    """
-    if source_type == 'csv':
-        return pd.read_csv(io.BytesIO(file_contents))
-    elif source_type in ['xlsx', 'xls']:
-        return pd.read_excel(io.BytesIO(file_contents), sheet_name=0)
-    elif source_type == 'json':
-        return pd.read_json(io.BytesIO(file_contents))
-    elif source_type == 'parquet':
-        return pd.read_parquet(io.BytesIO(file_contents))
-    else:
-        raise ValueError("Unsupported file type")
-
-
 def _calculate_readiness_score(df: pd.DataFrame):
     """
     Calculates the readiness score for a single DataFrame.
@@ -69,21 +16,25 @@ def _calculate_readiness_score(df: pd.DataFrame):
     # 1. Completeness Score (based on nulls)
     total_cells = df.size
     null_cells = df.isnull().sum().sum()
-    completeness_score = max(0, 100 - (null_cells / total_cells * 100))
+    completeness_score = max(0, 100 - (null_cells / total_cells * 100)) if total_cells > 0 else 100
 
     # 2. Consistency Score (based on duplicate rows)
     duplicate_rows = df.duplicated().sum()
     total_rows = len(df)
-    consistency_score = max(0, 100 - (duplicate_rows / total_rows * 100))
+    consistency_score = max(0, 100 - (duplicate_rows / total_rows * 100)) if total_rows > 0 else 100
 
     # 3. Schema Health Score (heuristic-based)
     schema_health_score = 100
-    for col in df.select_dtypes(include=['object']).columns:
-        if pd.to_numeric(df[col], errors='coerce').notna().sum() > 0:
-             schema_health_score -= 5
     
+    # Penalize for object columns that might contain mixed types
+    for col in df.select_dtypes(include=['object']).columns:
+        # Check if a sample of the column can be converted to numeric, suggesting mixed types
+        if pd.to_numeric(df[col].dropna().iloc[:100], errors='coerce').notna().sum() > 0:
+              schema_health_score -= 5
+    
+    # Penalize for columns with very low variance (e.g., all the same value)
     for col in df.columns:
-        if df[col].nunique() == 1:
+        if df[col].nunique() == 1 and len(df) > 1:
             schema_health_score -= 10
 
     schema_health_score = max(0, schema_health_score)
@@ -101,14 +52,61 @@ def _calculate_readiness_score(df: pd.DataFrame):
 def rate_readiness(file_contents: bytes, filename: str):
     """
     Main function to rate the readiness of a dataset from an uploaded file.
+    Handles multiple sheets in Excel files.
     """
     file_extension = filename.split('.')[-1].lower()
-    
-    readiness_score, rows_analyzed = _read_data_and_calculate_score(file_extension, file_contents, filename)
-    
-    return {
-        "source_file": filename,
-        "readiness_score": readiness_score,
-        "total_rows_analyzed": rows_analyzed
-    }
+    all_sheets_scores = {}
+
+    try:
+        if file_extension in ['csv', 'json', 'parquet']:
+            if file_extension == 'csv':
+                df = pd.read_csv(io.BytesIO(file_contents))
+            elif file_extension == 'json':
+                df = pd.read_json(io.BytesIO(file_contents))
+            elif file_extension == 'parquet':
+                df = pd.read_parquet(io.BytesIO(file_contents))
+            
+            sheet_name = filename.rsplit('.', 1)[0]
+            all_sheets_scores[sheet_name] = {
+                "readiness_score": _calculate_readiness_score(df),
+                "total_rows_analyzed": len(df)
+            }
+
+        elif file_extension in ['xlsx', 'xls']:
+            xls_sheets = pd.read_excel(io.BytesIO(file_contents), sheet_name=None)
+            if not xls_sheets:
+                raise ValueError("The Excel file has no sheets or is empty.")
+            
+            for sheet_name, df in xls_sheets.items():
+                all_sheets_scores[sheet_name] = {
+                    "readiness_score": _calculate_readiness_score(df),
+                    "total_rows_analyzed": len(df)
+                }
+        
+        elif file_extension == 'sql':
+            # For SQL, we can only rate schema health
+            sql_script = file_contents.decode('utf-8')
+            schema_health_score = 100
+            if 'create table' not in sql_script.lower():
+                schema_health_score -= 50
+            
+            all_sheets_scores['sql_schema'] = {
+                "readiness_score": {
+                    "overall": round(schema_health_score * 0.2),
+                    "completeness": 100,
+                    "consistency": 100,
+                    "schema_health": schema_health_score
+                },
+                "total_rows_analyzed": "N/A",
+                "message": "Scored based on SQL schema definition; no data rows analyzed."
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file format: {file_extension}")
+
+        return {
+            "readiness_rater": all_sheets_scores
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process the file '{filename}'. Error: {str(e)}")
 
