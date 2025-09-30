@@ -1,5 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.agents.source import schema_scanner, dedup_agent, field_profiler, drift_detector
+from app.agents.source import schema_scanner, dedup_agent, field_profiler, drift_detector,readiness_rater
 from app.orchestrator import workflow
 import pandas as pd
 from tempfile import NamedTemporaryFile
@@ -7,6 +7,7 @@ import shutil
 import os
 
 router = APIRouter()
+SUPPORTED_FILE_EXTENSIONS = {"csv", "xlsx", "xls","json","sql"}
 
 # --- Schema scanner endpoint ---
 @router.post("/scan-schema")
@@ -45,6 +46,18 @@ async def profile_dataset(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {e}")
 
+@router.post("/rate-readiness")
+async def rate_readiness_endpoint(file: UploadFile = File(...)):
+    """
+    Calculates the readiness score for a dataset from an uploaded file.
+    Supported file types: CSV, Excel, JSON, Parquet, SQL.
+    """
+    file_extension = file.filename.split('.')[-1].lower()
+    if file_extension not in SUPPORTED_FILE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file format for readiness rating: {file_extension}")
+    
+    contents = await file.read()
+    return readiness_rater.rate_readiness(contents, file.filename)
 
 # --- Deduplicate endpoint ---
 @router.post("/deduplicate")
