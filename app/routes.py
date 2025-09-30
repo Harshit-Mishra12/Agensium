@@ -4,7 +4,7 @@ from app.orchestrator import workflow
 import pandas as pd
 from tempfile import NamedTemporaryFile
 import shutil
-import io
+import os
 
 router = APIRouter()
 
@@ -51,30 +51,43 @@ def run_workflow(dataset: list[dict], items: list[str]):
     return workflow(dataset, items)
 
 
-# --- Drift Detector endpoint ---
+# --- Drift Detector endpoint (CSV or SQL) ---
 @router.post("/detect-drift")
 async def detect_drift(
     baseline_file: UploadFile = File(...),
     current_file: UploadFile = File(...)
 ):
     """
-    Detect drift between baseline CSV and current CSV.
+    Detect drift between baseline and current datasets (CSV or SQL).
     Returns JSON report with schema and data drift.
     """
-    if not baseline_file.filename.endswith(".csv") or not current_file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Both files must be CSVs.")
+    valid_ext = (".csv", ".sql")
+    if not baseline_file.filename.endswith(valid_ext) or not current_file.filename.endswith(valid_ext):
+        raise HTTPException(status_code=400, detail="Files must be either both CSVs or both SQL dumps.")
 
     try:
-        with NamedTemporaryFile(delete=False, suffix=".csv") as tmp_base:
+        # Save baseline temp file
+        base_suffix = os.path.splitext(baseline_file.filename)[1]
+        with NamedTemporaryFile(delete=False, suffix=base_suffix) as tmp_base:
             shutil.copyfileobj(baseline_file.file, tmp_base)
             baseline_path = tmp_base.name
 
-        with NamedTemporaryFile(delete=False, suffix=".csv") as tmp_curr:
+        # Save current temp file
+        curr_suffix = os.path.splitext(current_file.filename)[1]
+        with NamedTemporaryFile(delete=False, suffix=curr_suffix) as tmp_curr:
             shutil.copyfileobj(current_file.file, tmp_curr)
             current_path = tmp_curr.name
 
+        # Detect drift (DriftDetector now supports both CSV and SQL)
         report = drift_detector.DriftDetector.detect_drift(baseline_path, current_path)
         return report
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error detecting drift: {e}")
+    finally:
+        # cleanup temp files
+        try:
+            os.remove(baseline_path)
+            os.remove(current_path)
+        except Exception:
+            pass
