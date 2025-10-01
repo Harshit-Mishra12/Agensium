@@ -68,8 +68,11 @@ async def rate_readiness_endpoint(file: UploadFile = File(...)):
             detail=f"Unsupported file format for readiness rating: {file_extension}"
         )
 
-    contents = await file.read()
-    return readiness_rater.rate_readiness(contents, file.filename)
+    try:
+        contents = await file.read()
+        return readiness_rater.rate_readiness(contents, file.filename)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error rating readiness: {e}")
 
 
 # --- Deduplicate endpoint ---
@@ -114,8 +117,12 @@ async def detect_drift(
             shutil.copyfileobj(current_file.file, tmp_curr)
             current_path = tmp_curr.name
 
-        # Detect drift
-        report = drift_detector.DriftDetector.detect_drift(baseline_path, current_path)
+        # ✅ Pass original names so DriftDetector can use them
+        report = drift_detector.DriftDetector.detect_drift(
+            baseline_path, current_path,
+            baseline_name=baseline_file.filename,
+            current_name=current_file.filename
+        )
         return report
 
     except Exception as e:

@@ -8,24 +8,25 @@ from scipy.stats import entropy
 
 def _profile_dataframe(df: pd.DataFrame, baseline_schema: dict | None = None):
     """
-    Profile a single dataframe (field stats, anomalies, drift) with 2-decimal rounding.
+    Profile a single dataframe (field stats + anomalies) with 2-decimal rounding.
+    Returns the unified 'columns' format for frontend.
     """
-    results = {"field_statistics": {}, "anomalies": {}}
+    columns = {}
 
-    # --- Field-level stats ---
     for col in df.columns:
         col_data = df[col].dropna()
 
+        # --- Stats ---
         if col_data.empty:
-            continue
-
-        if pd.api.types.is_numeric_dtype(col_data):
+            stats = {}
+        elif pd.api.types.is_numeric_dtype(col_data):
             stats = {
                 "min": round(float(col_data.min()), 2),
                 "max": round(float(col_data.max()), 2),
                 "mean": round(float(col_data.mean()), 2),
                 "std_dev": round(float(col_data.std()), 2),
-                "entropy": round(float(entropy(pd.value_counts(col_data, normalize=True), base=2)), 2),
+                "unique_values": None,
+                "entropy": round(float(entropy(pd.value_counts(col_data, normalize=True), base=2)), 2)
             }
         elif pd.api.types.is_datetime64_any_dtype(col_data) or "date" in col.lower():
             try:
@@ -33,67 +34,51 @@ def _profile_dataframe(df: pd.DataFrame, baseline_schema: dict | None = None):
                 stats = {
                     "min": str(col_data.min().date()) if not col_data.empty else None,
                     "max": str(col_data.max().date()) if not col_data.empty else None,
-                    "temporal_spread_days": int((col_data.max() - col_data.min()).days)
-                    if not col_data.empty else None,
+                    "temporal_spread_days": int((col_data.max() - col_data.min()).days) if not col_data.empty else None,
+                    "unique_values": None,
+                    "entropy": None
                 }
             except Exception:
                 stats = {"note": "Invalid datetime format"}
         else:
             stats = {
+                "min": None,
+                "max": None,
+                "mean": None,
+                "std_dev": None,
                 "unique_values": int(col_data.nunique()),
-                "entropy": round(float(entropy(pd.value_counts(col_data, normalize=True), base=2)), 2),
+                "entropy": round(float(entropy(pd.value_counts(col_data, normalize=True), base=2)), 2)
             }
 
-        results["field_statistics"][col] = stats
+        # --- Anomalies ---
+        anomalies = {
+            "missing_values": round(df[col].isnull().mean() * 100, 2) if df[col].isnull().any() else 0,
+            "outliers": [],
+            "schema_change": None
+        }
 
-    # --- Anomaly detection ---
-    anomalies = {}
+        if pd.api.types.is_numeric_dtype(col_data):
+            q1 = df[col].quantile(0.25)
+            q3 = df[col].quantile(0.75)
+            iqr = q3 - q1
+            high_threshold = q3 + 1.5 * iqr
+            low_threshold = q1 - 1.5 * iqr
+            outlier_values = df[(df[col] > high_threshold) | (df[col] < low_threshold)][col].tolist()
+            anomalies["outliers"] = [round(float(x), 2) for x in outlier_values] if outlier_values else []
 
-    # Missing values %
-    missing = df.isnull().mean()
-    anomalies["missing_values"] = {col: round(p * 100, 2) for col, p in missing.items() if p > 0}
+        columns[col] = {
+            "stats": stats,
+            "anomalies": anomalies
+        }
 
-    # Schema drift check
-    if baseline_schema:
-        drift = {}
-        for col, values in baseline_schema.items():
-            if col in df.columns and df[col].dtype == "object":
-                new_values = set(df[col].dropna().unique())
-                baseline_values = set(values)
-                new_categories = new_values - baseline_values
-                if new_categories:
-                    drift[col] = {"new_categories": list(new_categories)}
-        if drift:
-            anomalies["schema_drift"] = drift
-
-    # Outliers (IQR method)
-    outliers = {}
-    for col in df.select_dtypes(include=[np.number]).columns:
-        q1 = df[col].quantile(0.25)
-        q3 = df[col].quantile(0.75)
-        iqr = q3 - q1
-        high_threshold = q3 + 1.5 * iqr
-        low_threshold = q1 - 1.5 * iqr
-        outlier_values = df[(df[col] > high_threshold) | (df[col] < low_threshold)][col].tolist()
-        if outlier_values:
-            # Round outlier values to 2 decimals
-            outliers[col] = [round(float(x), 2) for x in outlier_values]
-    if outliers:
-        anomalies["outliers"] = outliers
-
-    results["anomalies"] = anomalies
-    return results
+    return {"columns": columns}
 
 
 # --- File type handlers ---
 def profile_csv(contents: bytes, filename: str):
     df = pd.read_csv(io.BytesIO(contents))
     file_key = os.path.splitext(filename)[0]
-    return {
-        file_key: {
-            "main": _profile_dataframe(df)
-        }
-    }
+    return {file_key: {"main": _profile_dataframe(df)}}
 
 
 def profile_excel(contents: bytes, filename: str):
@@ -109,11 +94,7 @@ def profile_excel(contents: bytes, filename: str):
 def profile_json(contents: bytes, filename: str):
     df = pd.read_json(io.BytesIO(contents))
     file_key = os.path.splitext(filename)[0]
-    return {
-        file_key: {
-            "main": _profile_dataframe(df)
-        }
-    }
+    return {file_key: {"main": _profile_dataframe(df)}}
 
 
 def profile_sql(contents: bytes, filename: str):
@@ -136,7 +117,7 @@ def profile_sql(contents: bytes, filename: str):
         conn.close()
 
 
-# --- Dispatcher by extension ---
+# --- Dispatcher ---
 def profile_file(contents: bytes, filename: str):
     ext = os.path.splitext(filename)[1].lower()
     if ext in [".csv"]:
